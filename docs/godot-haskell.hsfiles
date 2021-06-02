@@ -1,0 +1,208 @@
+{-# START_FILE .gitignore #-}
+dist*
+*.hi
+*.o
+.stack-work/
+.stack-work-devel/
+*~
+\#*
+*.import
+result
+
+{-# START_FILE {{name}}.cabal #-}
+cabal-version: 1.12
+
+name:           {{name}}
+version:        0.0.0.0
+description:    Please see the README on Github at <https://github.com/{{github-username}}/{{name}}#readme>
+homepage:       https://github.com/{{github-username}}/{{name}}#readme
+bug-reports:    https://github.com/{{github-username}}/{{name}}/issues
+author:         {{author-name}}
+maintainer:     {{author-email}}
+copyright:      {{copyright}}
+license:        BSD3
+license-file:   LICENSE
+build-type:     Simple
+extra-source-files:
+    ChangeLog.md
+    README.md
+
+source-repository head
+  type: git
+  location: https://github.com/{{github-username}}/{{name}}
+
+library
+  exposed-modules: Lib
+  hs-source-dirs: src
+  ghc-options:
+    -Wall
+    -fwarn-unused-do-bind
+    -fwarn-tabs
+    -fwarn-incomplete-uni-patterns
+    -fwarn-incomplete-record-updates
+    -O2
+  build-depends:
+      base >=4.12 && <5
+    , godot-haskell
+    , linear
+    , stm
+    , text
+    , vector
+  default-language: Haskell2010
+
+foreign-library {{name}}
+  type: native-shared
+  other-modules: FLib
+  hs-source-dirs: ffi/flib
+  c-sources: ffi/cbits/flib.c
+  build-depends:
+      base >= 4.12 && <5
+    , godot-haskell
+    , {{name}}
+  default-language: Haskell2010
+
+
+{-# START_FILE src/Lib.hs #-}
+{-# LANGUAGE OverloadedStrings, TemplateHaskell, MultiParamTypeClasses #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+module Lib
+  ( exports
+  )
+where
+
+import           Godot
+import qualified Godot.Gdnative.Internal.Api   as Api
+import qualified Data.Text                     as T
+import           Control.Monad
+import           Data.Function                            ( (&) )
+
+exports :: GdnativeHandle -> IO ()
+exports desc = do
+  registerClass $ RegClass desc $ classInit @Main
+
+data Main = Main
+  { _mBase :: Node
+  , _mTime :: MVar Float
+  }
+
+instance HasBaseClass Main where
+  type BaseClass Main = Node
+  super = _mBase
+instance NativeScript Main where
+  classInit base = Main base <$> newMVar 0
+  classMethods =
+    [ method1 "_process" $ main_process
+    ]
+
+main_process :: Main -> GodotVariant -> IO ()
+main_process self deltaVt = do
+  delta <- fromGodotVariant deltaVt
+  (sec, sec') <- do
+    t <- readMVar (_mTime self)
+    let t' = t + delta
+    _ <- swapMVar (_mTime self) t'
+    return (floor t, floor t')
+  when (sec < sec') $
+    "Seconds passed: " ++ Prelude.show sec'
+    & T.pack
+    & (toLowLevel :: Text -> IO GodotString)
+    >>= Api.godot_print
+
+deriveBase ''Main
+
+
+
+{-# START_FILE ffi/flib/FLib.hs #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
+module FLib where
+
+import qualified Foreign
+import qualified Godot.Gdnative.Internal       as FFI
+import           Godot.Gdnative
+import           Godot.Nativescript
+import           Lib
+
+
+
+godot_nativescript_init :: GdnativeHandle -> IO ()
+godot_nativescript_init desc = do
+  defaultExports desc
+  exports desc
+  putStrLn "Haskell NativeScript lib initialized"
+
+foreign export ccall godot_nativescript_init :: GdnativeHandle -> IO ()
+
+
+godot_gdnative_init :: FFI.GdnativeInitOptionsPtr -> IO ()
+godot_gdnative_init opts = Foreign.peek opts >>= FFI.initApiStructs
+
+foreign export ccall godot_gdnative_init :: FFI.GdnativeInitOptionsPtr -> IO ()
+
+
+godot_gdnative_terminate :: FFI.GdnativeTerminateOptionsPtr -> IO ()
+godot_gdnative_terminate _ = return ()
+
+foreign export ccall godot_gdnative_terminate :: FFI.GdnativeTerminateOptionsPtr -> IO ()
+
+
+
+{-# START_FILE ffi/cbits/flib.c #-}
+#include "HsFFI.h"
+
+static void flib_init() __attribute__((constructor));
+static void flib_init() {
+  static char *argv[] = { "lib{{name}}", 0 }, **argv_ = argv;
+  static int argc = 1;
+  hs_init(&argc, &argv_);
+}
+
+static void flib_fini() __attribute__((destructor));
+static void flib_fini() {
+  hs_exit();
+}
+
+
+
+{-# START_FILE game-tmp/lib/lib{{name}}.gdnlib #-}
+[general]
+
+singleton=false
+load_once=true
+symbol_prefix="godot_"
+reloadable=false
+
+[entry]
+
+X11.64="res://lib/lib{{name}}.so"
+OSX.64="res://lib/lib{{name}}.dylib"
+Windows.64="res://lib/lib{{name}}.dll"
+
+
+{-# START_FILE stack.yaml #-}
+# find a enter a nightly or LTS version you want:
+resolver: <lts-or-nightly>
+
+extra-deps:
+   - git: https://github.com/SimulaVR/godot-haskell.git
+     commit: <commit hash>
+
+{-# START_FILE Makefile #-}
+NAME = {{name}}
+STACKLIBFILE = $(shell stack path --local-install-root)/lib/lib$(NAME).so
+GODOTPROJECT = $(shell stack path --project-root)/game
+
+all: stack
+stack:
+	stack build --fast --force-dirty
+	cp $(STACKLIBFILE) $(GODOTPROJECT)/lib
+stack-run:
+	stack build
+	cp $(STACKLIBFILE) $(GODOTPROJECT)/lib
+	godot -e --path ./game
+stack-watch:
+	stack build --file-watch --fast --exec "cp $(STACKLIBFILE) $(GODOTPROJECT)/lib"
+project-watch:
+	stack exec godot-haskell-project-generator game src
+updatelib:
+	cp $(STACKLIBFILE) $(GODOTPROJECT)/lib
